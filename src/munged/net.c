@@ -1,5 +1,6 @@
 /*****************************************************************************
  *  Written by Chris Dunlap <cdunlap@llnl.gov>.
+ *  Updated by Chris Coates <christopher.james.coates@gmail.com>.
  *  Copyright (C) 2007-2022 Lawrence Livermore National Security, LLC.
  *  Copyright (C) 2002-2007 The Regents of the University of California.
  *  UCRL-CODE-155910.
@@ -31,6 +32,7 @@
 #endif /* HAVE_CONFIG_H */
 
 #include <assert.h>
+#include <stdio.h>
 #include <errno.h>
 #include <sys/types.h>                  /* before ifaddrs.h for NetBSD 7.1.2 */
 #if HAVE_IFADDRS_H
@@ -72,7 +74,7 @@ static const struct ifaddrs * _net_get_ifa_via_ifname (
         const char *name, const struct ifaddrs *ifa_list);
 
 static const struct ifaddrs * _net_get_ifa_via_addr (
-        const struct hostent *h, const struct ifaddrs *ifa_list);
+        const struct addrinfo *h, const struct ifaddrs *ifa_list);
 
 #endif /* HAVE_GETIFADDRS */
 
@@ -123,8 +125,16 @@ net_get_hostname (char **result)
 int
 net_get_hostaddr (const char *name, struct in_addr *inaddrp, char **ifnamep)
 {
-    struct hostent *h;
-    int             rv;
+    struct addrinfo hints, *servinfo, *h;
+    int rv;
+
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_socktype = SOCK_DGRAM; // Datagram socket
+    hints.ai_family = AF_INET; // use IPv4 only
+    hints.ai_flags = AI_PASSIVE; // for wildcard IP addresses
+    hints.ai_protocol = 0; // any protocol
+    hints.ai_addr = NULL;
+    hints.ai_next = NULL;
 
     if ((name == NULL) || (inaddrp == NULL) || (ifnamep == NULL)) {
         errno = EINVAL;
@@ -133,15 +143,25 @@ net_get_hostaddr (const char *name, struct in_addr *inaddrp, char **ifnamep)
     rv = _net_get_hostaddr_via_ifaddrs (name, inaddrp, ifnamep);
     /*
      *  If unable to set addr via getifaddrs(), fallback to traditional lookup.
-     *  FIXME: gethostbyname() obsolete as of POSIX.1-2001.  Use getaddrinfo().
+     *  FIXED: gethostbyname() obsolete as of POSIX.1-2001.
+     *  Replaced with getaddrinfo().
      */
     if (rv < 0) {
-        h = gethostbyname (name);
-        if ((h != NULL) && (h->h_addrtype == AF_INET)) {
-            *inaddrp = * (struct in_addr *) h->h_addr;
-            rv = 0;
+        if ((h = getaddrinfo(name, NULL, &hints, &servinfo)) != 0) {
+          fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(h));
+          exit(1);
+        }
+        while (h)
+        {
+          if (h != NULL) {
+              *inaddrp = * (struct in_addr *) h->ai_addr;
+              rv = 0;
+          }
+        h = h->ai_next;
         }
     }
+    freeaddrinfo(h);
+
     return rv;
 }
 
@@ -165,8 +185,19 @@ _net_get_hostaddr_via_ifaddrs (const char *name, struct in_addr *inaddrp,
 #if HAVE_GETIFADDRS
     struct ifaddrs       *ifa_list;
     const struct ifaddrs *ifa;
-    struct hostent       *h;
+    //struct hostent       *h;
     int                   rv = -1;
+    
+    struct addrinfo hints, *servinfo, *h;
+        
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_socktype = SOCK_DGRAM; // Datagram socket
+    hints.ai_family = AF_INET; // use IPv4 only
+    hints.ai_flags = AI_PASSIVE; // for wildcard IP addresses
+    hints.ai_protocol = 0; // any protocol
+    hints.ai_cannonname = NULL;
+    hints.ai_addr = NULL;
+    hints.ai_next = NULL;
 
     assert (name != NULL);
     assert (inaddrp != NULL);
@@ -181,14 +212,19 @@ _net_get_hostaddr_via_ifaddrs (const char *name, struct in_addr *inaddrp,
     /*
      *  Check if NAME matches a hostname or IP address assigned to a local
      *    network interface.
-     *  FIXME: gethostbyname() obsolete as of POSIX.1-2001.  Use getaddrinfo().
+     *  FIXED: gethostbyname() obsolete as of POSIX.1-2001.  Used getaddrinfo().
      */
     if (ifa == NULL) {
-        h = gethostbyname (name);
-        if (h != NULL) {
-            ifa = _net_get_ifa_via_addr (h, ifa_list);
+        if ((h = getaddrinfo(name, NULL, &hints, &servinfo)) != 0) {
+          fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(h));
+          exit(1);
+        }
+        if ((h->ai_addr != NULL) {
+            *ifa = _net_get_ifa_via_addr (h->ai_addr, ifa_list);
+            rv = 0;
         }
     }
+              
     /*  If a match is found...
      */
     if (ifa != NULL) {
@@ -200,12 +236,13 @@ _net_get_hostaddr_via_ifaddrs (const char *name, struct in_addr *inaddrp,
     }
     /*  If a match is not found, but host lookup succeeded...
      */
-    else if ((h != NULL) && (h->h_addrtype == AF_INET)) {
+    else if ((h != NULL) && (h->h_ai_family == AF_INET)) {
         *inaddrp = * (struct in_addr *) h->h_addr;
         *ifnamep = NULL;
         rv = 0;
     }
     freeifaddrs (ifa_list);
+    freeaddrinfo(h);
     return rv;
 
 #else  /* !HAVE_GETIFADDRS */
@@ -253,7 +290,7 @@ _net_get_ifa_via_ifname (const char *name, const struct ifaddrs *ifa_list)
  *  Return a ptr to the matching ifaddrs struct, or NULL if no match is found.
  */
 static const struct ifaddrs *
-_net_get_ifa_via_addr (const struct hostent *h, const struct ifaddrs *ifa_list)
+_net_get_ifa_via_addr (const struct addrinfo *h, const struct ifaddrs *ifa_list)
 {
     const struct ifaddrs  *ifa;
     struct sockaddr_in    *sai;
